@@ -53,7 +53,7 @@ export const initialContent: PageContent = Object.fromEntries(Object.entries({
   eyebrow: 'SAMPLE DOCUMENT',
   title: '# Example heading',
   intro: 'This page contains separate blocks for a heading, introduction, body text, margin note, and footer.',
-  body: 'Select a block in the sidebar to edit its content. The source editor accepts Markdown or HTML. Changes appear on the page as you type.\n\n## Formatting\n\nText can contain **bold**, *italic*, links, headings, and lists. Each block has its own font, size, line height, and alignment.\n\n## Layout\n\nSwitch to Admin to move or resize a block. Content that exceeds a block is clipped.',
+  body: 'Select a block in the sidebar to edit its content. The source editor accepts Markdown or HTML. Changes appear on the page as you type.\n\n## Formatting\n\nText can contain **bold**, *italic*, links, headings, and lists. Each block has its own font, size, line height, and alignment.\n\n## Layout\n\nMove or resize blocks in your document. Content that exceeds a block is clipped.',
   note: '**Margin note**\n\nThis is a separate text block. Its position, dimensions, and typography can be edited independently of the main text.',
   footer: 'Sample document · Page 1',
 }).map(([key, value]) => [key, { format: 'markdown', value }]));

@@ -14,6 +14,7 @@ const styles = `
 :scope[data-layout-editing] .box { cursor:move; touch-action:none; }
 :scope[data-layout-editing] .box::after { content:''; position:absolute;inset:0;pointer-events:none;outline:1px solid #22785b44; }
 :scope[data-layout-editing] .box.selected::after { outline:2px solid var(--tf-accent); outline-offset:2px; }
+:scope[data-layout-editing] [data-tf-selected] { outline:2px dashed var(--tf-accent); outline-offset:1px; }
 .tf-label {position:absolute;left:0;top:0;transform:translateY(-100%);background:var(--tf-accent);color:white;font:11px Arial,sans-serif;padding:4px 7px;white-space:nowrap;pointer-events:none;z-index:2}
 .tf-handle {position:absolute;right:-5px;bottom:-5px;width:12px;height:12px;border:2px solid white;background:var(--tf-accent);cursor:nwse-resize;z-index:3}
 @media print { .box::after,.tf-label,.tf-handle {display:none} }
@@ -23,13 +24,20 @@ function scopedStyle(css: string) {
   style.textContent = `@scope {\n${css}\n}`;
   return style;
 }
+function layoutSignature(template: PageTemplate) {
+  return JSON.stringify({ css: template.css, boxes: template.boxes.map(box => ({
+    id: box.id, label: box.label, css: box.css, locked: box.locked ?? false,
+  })) });
+}
 
 /** Light-DOM page with CSS-driven blocks and optional built-in editing. */
 export class TextflowPage extends HTMLElement {
   static observedAttributes = ['editable'];
   #template: PageTemplate | null = null;
+  #layoutBaseline: string | null = null;
   #content: PageContent = {};
   #selected: string | null = null;
+  #elementSelector: string | null = null;
   #editorMode: 'admin' | 'user' = 'user';
   #page: HTMLElement | null = null;
   #pageStyle: HTMLStyleElement | null = null;
@@ -47,6 +55,7 @@ export class TextflowPage extends HTMLElement {
     this.addEventListener('pointerup', this.#pointerEnd);
     this.addEventListener('pointercancel', this.#pointerCancel);
     this.addEventListener('keydown', this.#keyDown);
+    this.addEventListener('click', event => { if (this.editable) event.preventDefault(); });
     this.addEventListener('load', () => this.#scheduleOverflow(), true);
   }
   connectedCallback() {
@@ -58,16 +67,22 @@ export class TextflowPage extends HTMLElement {
     this.#observer.disconnect(); cancelAnimationFrame(this.#frame); this.#drag = null;
     document.fonts.removeEventListener('loadingdone', this.#scheduleOverflow);
   }
-  attributeChangedCallback() { this.#renderSelection(); }
+  attributeChangedCallback() {
+    if (!this.editable) { this.#pointerCancel(); this.selectContentElement(null); }
+    this.#renderSelection();
+  }
   get editorMode() { return this.#editorMode; }
   set editorMode(value: 'admin' | 'user') {
     this.#pointerCancel(); this.#editorMode = value; this.#renderSelection();
   }
-  get editable() { return this.#editorMode === 'admin' && this.hasAttribute('editable'); }
+  get editable() { return this.hasAttribute('editable'); }
   set editable(value: boolean) { this.toggleAttribute('editable', value); }
   get template() { return this.#template ? structuredClone(this.#template) : null; }
   set template(value: PageTemplate | null) {
+    this.#elementSelector = null;
     this.#template = value ? structuredClone(value) : null;
+    // A customized import has no known source baseline; retain its flag until the host resets it.
+    this.#layoutBaseline = this.#template && !this.#template.layoutModified ? layoutSignature(this.#template) : null;
     for (const box of this.#template?.boxes ?? []) if (box.locked) this.#content[box.id] = structuredClone(box.content ?? { format: 'markdown', value: '' });
     if (!value?.boxes.some(box => box.id === this.#selected)) this.#selected = null;
     this.#overflow.clear(); if (this.isConnected) this.#render();
@@ -87,6 +102,7 @@ export class TextflowPage extends HTMLElement {
   get snapshot(): PageSnapshot | null {
     return this.#template ? createPageSnapshot(this.#template, this.content) : null;
   }
+  get layoutModified() { return this.#template?.layoutModified ?? false; }
   /** Hydration is a host operation; it restores the saved layout and all content together. */
   set snapshot(value: PageSnapshot | null) {
     this.#content = value ? Object.fromEntries(value.boxes.map(box => [box.id, structuredClone(box.content)])) : {};
@@ -105,42 +121,80 @@ export class TextflowPage extends HTMLElement {
     if (this.#editorMode !== 'admin') return false;
     const box = this.#template?.boxes.find(box => box.id === id);
     if (!box) return false;
+    if ((box.locked ?? false) === locked) return true;
     box.content = this.content[id]; box.locked = locked;
     this.#renderSelection(); this.#emitChange(); return true;
   }
   get selectedBoxId() { return this.#selected; }
-  set selectedBoxId(id: string | null) { this.#selected = this.#elements.has(id ?? '') ? id : null; this.#renderSelection(); }
+  set selectedBoxId(id: string | null) {
+    this.#selected = this.#elements.has(id ?? '') ? id : null;
+    this.#elementSelector = null; this.#renderSelection();
+  }
+  /** A CSS selector scoped to the selected box; structural paths follow the current HTML. */
+  get selectedElementSelector() { return this.#elementSelector; }
+  get selectedElement(): HTMLElement | null {
+    return this.#elementSelector ? this.#elements.get(this.#selected ?? '')?.querySelector<HTMLElement>(this.#elementSelector) ?? null : null;
+  }
+  /** Select any rendered HTML descendant, or null to select only the box. */
+  selectContentElement(element: HTMLElement | null): boolean {
+    let selector: string | null = null;
+    if (element) {
+      if (!this.editable) return false;
+      const box = [...this.#elements.values()].find(box => box.querySelector(':scope > .content')?.contains(element));
+      const content = box?.querySelector(':scope > .content');
+      if (!box || !content || element === content) return false;
+      const path: string[] = [];
+      for (let node: Element | null = element; node && node !== content; node = node.parentElement) {
+        const siblings = [...node.parentElement!.children].filter(sibling => sibling.localName === node!.localName);
+        path.unshift(`${CSS.escape(node.localName)}:nth-of-type(${siblings.indexOf(node) + 1})`);
+      }
+      if (this.#selected !== box.dataset.block) { this.selectedBoxId = box.dataset.block!; this.#emitSelection(); }
+      selector = `:scope > .content > ${path.join(' > ')}`;
+    }
+    if (selector === this.#elementSelector) return true;
+    this.#elementSelector = selector; this.#renderElementSelection();
+    this.dispatchEvent(new CustomEvent('element-selection-change', { detail: { boxId: this.#selected, selector }, bubbles: true }));
+    return true;
+  }
+  /** Apply declarations to the selected HTML element, retaining the box's other CSS. */
+  setSelectedElementCss(changes: Record<string, string>): boolean {
+    const box = this.#template?.boxes.find(box => box.id === this.#selected);
+    if (!box || !this.selectedElement || !this.#elementSelector) return false;
+    this.setBoxCss(box.id, editCssDeclarations(box.css, changes, this.#elementSelector));
+    return true;
+  }
   get pageElement() { return this.#page; }
   getBoxElement(id: string) { return this.#elements.get(id) ?? null; }
   setBoxCss(id: string, css: string) {
-    if (this.#editorMode !== 'admin') return;
     const box = this.#template?.boxes.find(b => b.id === id);
-    if (!box) return;
+    if (!box || box.css === css) return;
     box.css = css;
     const sheet = this.#sheets.get(id); if (sheet) sheet.textContent = `@scope {\n${css}\n}`;
     this.#scheduleOverflow(); this.#emitChange();
   }
   setPageCss(css: string) {
-    if (this.#editorMode !== 'admin') return;
-    if (!this.#template) return;
+    if (!this.#template || this.#template.css === css) return;
     this.#template.css = css;
     if (this.#pageStyle) this.#pageStyle.textContent = `@scope {\n${css}\n}`;
     this.#scheduleOverflow(); this.#emitChange();
   }
   addBox(box = createTextBox()) {
-    if (this.#editorMode !== 'admin') return;
     if (!this.#template || this.#template.boxes.some(b => b.id === box.id)) return;
+    this.#elementSelector = null;
     this.#template.boxes.push(structuredClone(box)); this.#selected = box.id; this.#render(); this.#emitChange(); this.#emitSelection();
   }
   removeBox(id: string) {
-    if (this.#editorMode !== 'admin') return;
-    if (!this.#template) return;
+    if (!this.#template?.boxes.some(box => box.id === id)) return;
     this.#template.boxes = this.#template.boxes.filter(b => b.id !== id);
     this.#overflow.delete(id);
     if (this.#selected === id) this.#selected = null;
+    this.#elementSelector = null;
     this.#render(); this.#emitChange(); this.#emitSelection();
   }
-  #emitChange() { this.dispatchEvent(new CustomEvent('template-change', { detail: { template: this.template }, bubbles: true })); }
+  #emitChange() {
+    if (this.#template) this.#template.layoutModified = this.#layoutBaseline === null || layoutSignature(this.#template) !== this.#layoutBaseline;
+    this.dispatchEvent(new CustomEvent('template-change', { detail: { template: this.template }, bubbles: true }));
+  }
   #emitSelection() { this.dispatchEvent(new CustomEvent('selection-change', { detail: { boxId: this.#selected }, bubbles: true })); }
   #renderSelection() {
     this.toggleAttribute('data-layout-editing', this.editable);
@@ -154,13 +208,20 @@ export class TextflowPage extends HTMLElement {
       const handle = document.createElement('span'); handle.className = 'tf-handle'; handle.setAttribute('aria-hidden', 'true');
       element.append(label, handle);
     }
+    this.#renderElementSelection();
+  }
+  #renderElementSelection() {
+    this.querySelectorAll('[data-tf-selected]').forEach(element => element.removeAttribute('data-tf-selected'));
+    const selected = this.selectedElement;
+    if (this.editable && selected) selected.setAttribute('data-tf-selected', '');
+    else this.#elementSelector = null;
   }
   #renderContent() {
     for (const [id, element] of this.#elements) {
       const field = this.#content[id] ?? this.#template?.boxes.find(box => box.id === id)?.content;
       element.querySelector('.content')!.innerHTML = DOMPurify.sanitize(field ? field.format === 'markdown' ? marked.parse(field.value, { async: false }) : field.value : '', { USE_PROFILES: { html: true }, FORBID_TAGS: ['style', 'input', 'button', 'form', 'textarea', 'select'], FORBID_ATTR: ['style'] });
     }
-    this.#scheduleOverflow();
+    this.#renderElementSelection(); this.#scheduleOverflow();
   }
   #render() {
     this.#observer.disconnect(); this.#elements.clear(); this.#sheets.clear(); this.#page = null;
@@ -190,9 +251,10 @@ export class TextflowPage extends HTMLElement {
     }
   }
   #pointerDown = (e: PointerEvent) => {
-    if (!this.editable || e.button !== 0) return;
+    if (e.button !== 0) return;
     const element = (e.target as HTMLElement).closest<HTMLElement>('.box');
     if (!element || !this.#elements.has(element.dataset.block!)) { this.selectedBoxId = null; this.#emitSelection(); return; }
+    if (!this.editable) { this.selectedBoxId = element.dataset.block!; this.#emitSelection(); return; }
     const id = element.dataset.block!, box = this.#template!.boxes.find(b => b.id === id)!;
     // Refuse a malformed source rather than discard it when a control writes CSS.
     try { editCssDeclarations(box.css, {}); } catch { return; }
@@ -201,10 +263,13 @@ export class TextflowPage extends HTMLElement {
     const computed = getComputedStyle(element);
     this.#drag = { id, pointer: e.pointerId, x: e.clientX, y: e.clientY, left: element.offsetLeft, top: element.offsetTop, width: parseFloat(computed.width), height: parseFloat(computed.height), css: box.css, resize: (e.target as HTMLElement).classList.contains('tf-handle'), scaleX: bounds.width / this.#page!.offsetWidth, scaleY: bounds.height / this.#page!.offsetHeight };
     this.selectedBoxId = id; this.#emitSelection(); element.focus({ preventScroll: true }); this.setPointerCapture(e.pointerId);
+    this.selectContentElement(e.target instanceof HTMLElement ? e.target : null);
   };
   #pointerMove = (e: PointerEvent) => {
     const drag = this.#drag; if (!drag || drag.pointer !== e.pointerId) return;
     const dx = (e.clientX - drag.x) / drag.scaleX, dy = (e.clientY - drag.y) / drag.scaleY;
+    if (!dx && !dy) { this.setBoxCss(drag.id, drag.css); return; }
+    this.selectContentElement(null);
     const changes: Record<string, string> = drag.resize ? { width: `${Math.max(24, Math.round(drag.width + dx))}px`, height: `${Math.max(24, Math.round(drag.height + dy))}px` } : { left: `${Math.round(drag.left + dx)}px`, top: `${Math.round(drag.top + dy)}px` };
     this.setBoxCss(drag.id, editCssDeclarations(drag.css, changes));
   };

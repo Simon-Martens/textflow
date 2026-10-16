@@ -1,7 +1,7 @@
 import { createDocument, createPageSnapshot, parseDocument, type PageTemplate, type PageContent, type TextflowDocument } from '../src/index.js';
 import { pageCss } from './templates.js';
 export const storageKey = 'textflow-studio-v3';
-export interface StudioState { templates: PageTemplate[]; document: TextflowDocument; pageIndex: number; templateId: string | null; mode: 'admin' | 'user' }
+export interface StudioState { templates: PageTemplate[]; document: TextflowDocument; pageIndex: number; interactionMode?: 'content' | 'layout' }
 interface LegacyBox { id: string; label: string; x: number; y: number; width: number; height: number; fontFamily: string; fontSize: number; lineHeight: number; color: string; padding: number; textAlign: string }
 interface LegacyTemplate { id: string; name: string; width: number; height: number; background: string; boxes: LegacyBox[] }
 function loadPrevious(): { templates: PageTemplate[]; content: PageContent } | null {
@@ -42,5 +42,5 @@ export function loadSaved(): StudioState | null {
   const previous = loadPrevious();
   if (!previous?.templates.length) return null;
   const templates = previous.templates.map(template => ({ ...template, boxes: template.boxes.map(box => ({ ...box, content: box.content ?? previous.content[box.id] })) }));
-  return { templates, document: createDocument([createPageSnapshot(templates[0], previous.content)]), pageIndex: 0, templateId: templates[0].id, mode: 'admin' };
+  return { templates, document: createDocument([createPageSnapshot(templates[0], previous.content)]), pageIndex: 0, interactionMode: 'content' };
 }
